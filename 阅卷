@@ -1,0 +1,152 @@
+import re  # 用于正则
+from PIL import Image  # 用于打开图片和对图片处理
+import pytesseract  # 用于图片转文字
+from selenium import webdriver  # 用于打开网站
+from selenium.webdriver.support import expected_conditions as EC
+import time  # 代码运行停顿
+import xlrd, os
+
+
+class VerificationCode:
+    def get_pictures(self):
+        fp = webdriver.FirefoxProfile()
+        fp.set_preference('browser.download.manager.showWhenStarting', False)
+        fp.set_preference('browser.download.dir', '/home/webbuilder/Downloads/')
+        fp.set_preference('browser.download.folderList', 2)
+        fp.set_preference("browser.helperApps.alwaysAsk.force", False)
+        fp.set_preference("browser.helperApps.neverAsk.saveToDisk", "application/pdf")
+        self.driver = webdriver.Firefox(executable_path='/usr/local/develop/geckodriver', firefox_profile=fp)
+        # self.driver = webdriver.Chrome(executable_path='/usr/local/develop/chromedriver')
+        self.find_element = self.driver.find_element_by_css_selector
+        self.driver.maximize_window()
+        time.sleep(1)
+        self.driver.get('http://zhaoshengwx.ouchn.cn/notice.html')  # 打开登陆页面
+        self.driver.implicitly_wait(10)
+        # self.driver.save_screenshot('pictures.png')  # 全屏截图
+        self.driver.get_screenshot_as_file('pictures.png')  # 全屏截图
+        page_snap_obj = Image.open('pictures.png')
+        img = self.find_element('.ml-2')  # 验证码元素位置
+        time.sleep(1)
+        location = img.location
+        size = img.size  # 获取验证码的大小参数
+        left = location['x']
+        top = location['y']
+        right = left + size['width']
+        bottom = top + size['height']
+        image_obj = page_snap_obj.crop((left, top, right, bottom))  # 按照验证码的长宽，切割验证码
+        # image_obj.show()  # 打开切割后的完整验证码
+        # self.driver.close()  # 处理完验证码后关闭浏览器
+        return image_obj
+
+    def processing_image(self):
+        image_obj = self.get_pictures()  # 获取验证码
+        img = image_obj.convert("L")  # 转灰度
+        pixdata = img.load()
+        w, h = img.size
+        threshold = 160
+        # 遍历所有像素，大于阈值的为黑色
+        for y in range(h):
+            for x in range(w):
+                if pixdata[x, y] < threshold:
+                    pixdata[x, y] = 0
+                else:
+                    pixdata[x, y] = 255
+        return img
+
+    def delete_spot(self):
+        images = self.processing_image()
+        data = images.getdata()
+        w, h = images.size
+        black_point = 0
+        for x in range(1, w - 1):
+            for y in range(1, h - 1):
+                mid_pixel = data[w * y + x]  # 中央像素点像素值
+                if mid_pixel < 50:  # 找出上下左右四个方向像素点像素值
+                    top_pixel = data[w * (y - 1) + x]
+                    left_pixel = data[w * y + (x - 1)]
+                    down_pixel = data[w * (y + 1) + x]
+                    right_pixel = data[w * y + (x + 1)]
+                    # 判断上下左右的黑色像素点总个数
+                    if top_pixel < 10:
+                        black_point += 1
+                    if left_pixel < 10:
+                        black_point += 1
+                    if down_pixel < 10:
+                        black_point += 1
+                    if right_pixel < 10:
+                        black_point += 1
+                    if black_point < 1:
+                        images.putpixel((x, y), 255)
+                    black_point = 0
+        # images.show()
+        return images
+
+    def image_str(self, sfzno):
+        for j in range(5):
+            image = self.delete_spot()
+            result = pytesseract.image_to_string(image)  # 图片转文字
+            # print(result)
+            resultj = re.sub(u"([^\u4e00-\u9fa5\u0030-\u0039\u0041-\u005a\u0061-\u007a])", "", result)  # 去除识别出来的特殊字符
+            # print(resultj)
+            result_six = resultj[0:6]  # 只获取前6个字符
+            # print(result_four)
+            # return result_six
+            sfz = self.find_element('#sfz')
+            sfz.send_keys(sfzno)
+            time.sleep(1)
+            yanzheng = self.find_element('#yanzheng')
+            yanzheng.send_keys(result_six)
+            time.sleep(1)
+            submit = self.driver.find_element_by_name("submit")
+            submit.click()
+            time.sleep(1)
+            result_ = EC.alert_is_present()(self.driver)
+            if result_:
+                self.driver.switch_to.alert.accept()
+                self.driver.close()
+                continue
+            download_ = self.driver.find_element_by_xpath('//a[@id="download"]')
+
+            # download_ = self.driver.find_element_by_id('download')
+            # print(download_)
+            if download_:
+                download_.click()
+                time.sleep(5)
+                # self.driver.switch_to.alert.accept()
+                print("no： " + str(sfzno) + "    key:ok")
+                time.sleep(5)
+                self.driver.close()
+                self.driver.quit()
+                break
+            else:
+                print("no： " + str(sfzno) + "    key:无信息")
+                self.driver.refresh()
+                self.driver.close()
+                self.driver.quit()
+        else:
+            print("no： " + str(sfzno) + "    key:no")
+
+    def do_get(self):
+        data = xlrd.open_workbook('/home/webbuilder/Documents/sfz.xls')
+        table = data.sheet_by_name('sheet1')
+        print("总行数：" + str(table.nrows))
+        for i in range(table.nrows):
+            if i == 0:
+                continue
+            if type(table.cell(i, 12).value).__name__ == "int":
+                cel_sfz = int(table.cell(i, 12).value)
+            else:
+                cel_sfz = table.cell(i, 12).value
+            # 判断文件是否存在，如果存在就不下载了，这个是用于最后的下载核对，正常下载时需要注释掉
+            path1 = "/home/webbuilder/Downloads/" + str(cel_sfz) + ".pdf"
+
+            if os.path.isfile(path1):
+                print("no： " + str(cel_sfz) + "    key:ok")
+                continue
+
+            self.image_str(cel_sfz)
+
+
+if __name__ == '__main__':
+    a = VerificationCode()
+    a.do_get()
